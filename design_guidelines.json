@@ -1,0 +1,50 @@
+{
+  "app_name": "Site Expense Manager",
+  "app_type": "dashboard",
+  "archetype": "ORGANIC & EARTHY & PERFORMANCE PRO hybrid (Professional construction finance manager)",
+  "typography": {
+    "headings": {
+      "font_family": "Outfit, sans-serif",
+      "weights": ["600", "700"],
+      "letter_spacing": "tracking-tight"
+    },
+    "body": {
+      "font_family": "Inter, sans-serif",
+      "weights": ["400", "500"]
+    },
+    "mono": {
+      "font_family": "JetBrains Mono, monospace"
+    }
+  },
+  "colors": {
+    "primary": "#0D5C3B",
+    "primary_hover": "#09462D",
+    "accent": "#D97706",
+    "background": "#F8FAFC",
+    "card_background": "#FFFFFF",
+    "text_main": "#0F172A",
+    "text_muted": "#64748B",
+    "border": "#E2E8F0",
+    "forbidden_color": "#1B93A4",
+    "forbidden_font": "space grotesk"
+  },
+  "component_strategy": {
+    "card_style": "Cardless / sharp clean borders with rounded-xl and subtle ring",
+    "tables": "Dense data table with sticky header and row hover state",
+    "badges": "Pill shaped status badges for categories, sites, needs_review, duplicate"
+  },
+  "grids": {
+    "dashboard_grid": "grid-cols-1 md:grid-cols-4 gap-6",
+    "tetris_grid": "grid-cols-1 md:grid-cols-12 gap-6"
+  },
+  "motion": {
+    "transition": "transition: transform 0.2s ease, opacity 0.2s ease",
+    "hover_lift": "hover:-translate-y-0.5 transition-all duration-200"
+  },
+  "accessibility": {
+    "min_contrast": "4.5:1 for normal text",
+    "test_id_convention": "kebab-case data-testid on all interactive and key informational elements"
+  },
+  "image_urls": [],
+  "instructions_to_main_agent": "Implement complete Site Expense Manager with JWT auth (Admin & Employee roles), employees/sites/categories CRUD, statement upload with Excel/CSV parser, transaction classification rule engine, duplicate detection, transaction review & manual correction, site/employee reports, and interactive dashboard."
+}
