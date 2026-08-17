@@ -183,6 +183,7 @@ you ever want to look inside.
 | Symptom | Try this |
 |---|---|
 | `Python was not found` when running `Install.bat` | Install Python and tick *Add Python to PATH*, then reboot. |
+| Install fails with `ERROR: Could not parse vswhere.exe output` while building **pandas** | Your Python has no prebuilt wheel for pandas. Update to the latest `Install.bat` / `requirements-local.txt` from this repo (pandas is now `>=2.2.4` with `--prefer-binary`), then run Install.bat again. If it still fails, install Python **3.11** or **3.12** (which have wheels for every dependency) and rerun. |
 | Browser shows *This site can't be reached* | Wait a few extra seconds after Start — the first launch can take up to 15s. |
 | Port 5555 already in use | Change `SEM_PORT` in the Start and Stop scripts to e.g. `5678`. |
 | App looks empty after start | You may have deleted sample data. Upload a statement or add a site/account to begin. |

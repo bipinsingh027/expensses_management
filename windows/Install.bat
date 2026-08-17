@@ -33,7 +33,12 @@ if not exist "backend\.venv" (
 
 echo [2/5] Installing Python dependencies (this can take a few minutes)...
 call backend\.venv\Scripts\python.exe -m pip install --upgrade pip
-call backend\.venv\Scripts\pip.exe install -r backend\requirements-local.txt
+call backend\.venv\Scripts\pip.exe install --prefer-binary --only-binary=:all: -r backend\requirements-local.txt
+if errorlevel 1 (
+    echo.
+    echo   Falling back to a mixed install ^(some packages may build from source^)...
+    call backend\.venv\Scripts\pip.exe install --prefer-binary -r backend\requirements-local.txt
+)
 if errorlevel 1 goto :err
 
 echo [3/5] Installing frontend dependencies...
