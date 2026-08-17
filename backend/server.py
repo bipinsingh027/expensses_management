@@ -1,6 +1,7 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
 from datetime import datetime, timezone
@@ -11,8 +12,10 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
 ROOT = Path(__file__).parent
-DATA = ROOT / "local_data"
-DATA.mkdir(exist_ok=True)
+# Local data directory can be overridden with SEM_DATA_DIR (useful on Windows to
+# point at Documents\SiteExpenseManager for easier backup by the user).
+DATA = Path(os.environ.get("SEM_DATA_DIR") or (ROOT / "local_data"))
+DATA.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA / "site_expense_manager.sqlite3"
 STATEMENTS = DATA / "statements"; DOCUMENTS = DATA / "documents"; REPORTS = DATA / "reports"
 for folder in (STATEMENTS, DOCUMENTS, REPORTS): folder.mkdir(exist_ok=True)
@@ -184,12 +187,29 @@ async def upload_document(transaction_id:str=Form(...),file:UploadFile=File(...)
 async def documents(transaction_id:str): return rows("SELECT id,transaction_id,filename,document_type,uploaded_at FROM documents WHERE transaction_id=?",(transaction_id,))
 @api.get("/backup")
 async def backup():
-    path=REPORTS/f"SiteExpenseBackup_{datetime.now().strftime('%Y-%m-%d')}.zip"
+    path=REPORTS/f"SiteExpenseBackup_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.zip"
     with zipfile.ZipFile(path,"w",zipfile.ZIP_DEFLATED) as z:
         z.write(DB_PATH,"site_expense_manager.sqlite3")
         for folder in (STATEMENTS,DOCUMENTS):
             for f in folder.iterdir(): z.write(f,f"{folder.name}/{f.name}")
     return FileResponse(path,filename=path.name)
+@api.post("/restore")
+async def restore(file:UploadFile=File(...)):
+    content=await file.read()
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as z:
+            names=set(z.namelist())
+            if "site_expense_manager.sqlite3" not in names: raise HTTPException(400,"ZIP does not contain site_expense_manager.sqlite3")
+            for f in STATEMENTS.iterdir(): f.unlink()
+            for f in DOCUMENTS.iterdir(): f.unlink()
+            z.extract("site_expense_manager.sqlite3", DATA)
+            for name in names:
+                if name.startswith("statements/") and not name.endswith("/"): z.extract(name, DATA)
+                elif name.startswith("documents/") and not name.endswith("/"): z.extract(name, DATA)
+    except zipfile.BadZipFile: raise HTTPException(400,"Uploaded file is not a valid backup ZIP")
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(400,f"Restore failed: {exc}")
+    return {"restored":True,"transactions":len(rows("SELECT id FROM transactions")),"accounts":len(rows("SELECT id FROM accounts")),"sites":len(rows("SELECT id FROM sites"))}
 @api.post("/sample-data/delete")
 async def delete_sample_data():
     with db() as c: c.execute("DELETE FROM transactions WHERE is_demo=1"); c.execute("DELETE FROM accounts WHERE notes='Demo account'"); c.execute("DELETE FROM sites WHERE notes='Demo site'"); c.execute("DELETE FROM categories WHERE notes='Demo category'")
@@ -204,4 +224,17 @@ async def month_close(data:CloseIn):
 @app.on_event("startup")
 async def startup(): init_db()
 app.include_router(api)
-app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:3000","http://127.0.0.1:3000","https://site-spend-central.preview.emergentagent.com"],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
+# Allow local access (Windows) as well as the Emergent preview host.
+_extra_origins = [o.strip() for o in os.environ.get("SEM_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:3000","http://127.0.0.1:3000","http://localhost:5555","http://127.0.0.1:5555","https://site-spend-central.preview.emergentagent.com",*_extra_origins],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
+# When a built React app is bundled next to the backend (frontend/build), serve
+# it from the same port so the whole app works via one URL on Windows.
+_BUILD = ROOT.parent / "frontend" / "build"
+if _BUILD.exists():
+    app.mount("/static", StaticFiles(directory=_BUILD / "static"), name="static")
+    @app.get("/{full_path:path}")
+    async def spa(full_path: str):
+        candidate = _BUILD / full_path
+        if full_path and candidate.exists() and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_BUILD / "index.html")

@@ -1,0 +1,33 @@
+{
+  "summary": "Verified new /api/restore endpoint and Backup UI restore form for local SQLite Site Expense Manager. Rewrote obsolete auth-based pytest file into a no-auth suite that covers root/dashboard/all resource endpoints, backup ZIP shape, restore round-trip, and three restore error paths. Backend: 9/9 pytest tests pass. Frontend: nav data-testids present for all 10 sidebar routes; Backup page shows Download + Restore form; POST /api/restore succeeds end-to-end returning {restored:true, transactions:20, accounts:2, sites:3} and the success banner (data-testid=backup-message) is rendered. However, the .dropzone <label> visually overlaps the 'Restore now' <button>, making the button not reliably clickable by a real user (Playwright had to click via JS to reach it).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Backup > Restore card", "issue": "The .dropzone label overlaps/covers the 'Restore now' submit button. A normal click in the button's visual area hits the label instead and re-opens the file picker; the button had to be clicked via JS to fire the form submit. Button text 'Restore now' is not visible in screenshots.", "selector": "[data-testid=\"restore-submit-button\"] / .dropzone", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Backup & restore", "issues": ["Restore card layout is broken: dropzone label and helper text overflow and overlap surrounding elements (see screenshot). Suggest wrapping label + button in a proper flex column with gap and giving the dropzone a fixed height, and hiding the native file input via visually-hidden CSS instead of leaving it absolutely positioned."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_site_expense.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix CSS on Backup page: prevent .dropzone label from overlapping/covering [data-testid=\"restore-submit-button\"] so a user can actually click Restore now.",
+    "Add explicit min-height / gap on .backup-card and .dropzone so the Restore card matches the Backup card visually."
+  ],
+  "critical_code_review_comments": [
+    "server.py /api/restore deletes every file under statements/ and documents/ before extracting. If the uploaded ZIP is missing those folders (e.g. a fresh backup with no receipts), local receipts still get wiped even though the DB is restored — acceptable per spec but worth documenting.",
+    "server.py catches only zipfile.BadZipFile; any other extraction error (e.g. permission, disk full) will 500 instead of returning a clean 400.",
+    "App.js Backup component uses default form <button> without type=\"submit\" attribute — currently works because it's the only button in the form, but adding explicit type=\"submit\" is safer if more buttons are ever added.",
+    "App.js is still a single-line minified-style file (~44 long lines) — readability remains poor; consider splitting per-route components into separate files.",
+    "server.py mounts a wildcard SPA route at /{full_path:path} which will shadow any future non-/api backend routes; fine for local Windows bundling but keep in mind."
+  ],
+  "updated_files": ["/app/backend/tests/test_site_expense.py"],
+  "success_rate": {"backend": "100% (9/9 pytest)", "frontend": "90% (all testids present, restore flow works but Restore-now button is visually blocked by overlapping label)"},
+  "test_credentials": "N/A (no-auth single-user app)",
+  "seed_data_creation": "None — used the app's existing demo seed (2 accounts, 3 sites, 12 categories, 20 transactions).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "App is no-auth local SQLite ledger. Previous auth-oriented test_site_expense.py was rewritten. Backend endpoints verified: /api/, /api/dashboard, /api/accounts, /api/sites, /api/categories, /api/rules, /api/statements, /api/transactions, /api/settings, /api/backup, /api/restore. Restore round-trip is safe against the existing seed. The only outstanding issue is a CSS overlap on the Backup page hiding the 'Restore now' button — functionally the endpoint works, only the button click path is blocked visually.",
+  "rca of the issue": "The Restore form is structured as <form> containing a <label class=\"dropzone\"> (with the hidden file input inside) followed by the submit <button>. In the current CSS the .dropzone label expands to fill available height and its absolutely-positioned inner content overflows downward, covering the sibling <button>. Any click near the button hits the label first because label is above the button in z-order/DOM flow, which re-triggers the file chooser instead of submitting the form. Reproduction: open /backup, choose a ZIP, try clicking 'Restore now' visually — file picker opens again. Programmatic .click() on the button fires the submit correctly and /api/restore returns 200. Mitigation: fix .dropzone CSS (fixed height, overflow:hidden, gap between label and button), or restructure the form so the submit button sits outside the label wrapper."
+}
