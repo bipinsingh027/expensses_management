@@ -25,8 +25,22 @@ Restart your PC once so the PATH updates apply.
 
 ### 1.2 Get the source code
 
-Download the project (ZIP from your git host, or the export from the platform).
-Unzip it somewhere permanent, e.g. `C:\SiteExpenseManager`.
+You have three easy options — pick whichever suits you:
+
+**Option A — Download ZIP from Emergent (simplest)**
+1. In the Emergent workspace, open the top menu → **Download code** (or *Export project*).
+2. Save the ZIP to your laptop and unzip it into a permanent folder such as
+   `C:\SiteExpenseManager`.
+
+**Option B — Push to GitHub, then clone on the laptop**
+1. In the Emergent workspace, use **Push to GitHub** to create the repo.
+2. On your laptop, install Git for Windows (<https://git-scm.com/download/win>).
+3. In `C:\` right-click → *Git Bash here* → run
+   `git clone https://github.com/<you>/<repo>.git SiteExpenseManager`.
+
+**Option C — Copy the folder manually**
+Copy the entire project folder (with `backend`, `frontend`, `windows`,
+`README.md` inside) from wherever you have it to your laptop.
 
 The folder should look like this:
 ```
@@ -48,12 +62,11 @@ It will:
 - Create a Python virtual environment inside `backend\.venv`
 - Install the Python packages the backend needs
 - Install the frontend packages and build the frontend for offline use
+- Place **Site Expense Manager** and **Stop Site Expense Manager** shortcuts on
+  your Desktop
 
 Grab a coffee — the first run downloads a few hundred MB and can take
 5–10 minutes. When it finishes you will see `Install complete`.
-
-For daily use you can copy `Start Site Expense Manager.bat` and
-`Stop Site Expense Manager.bat` to your Desktop for convenience.
 
 ---
 
@@ -77,6 +90,10 @@ You have two easy options:
 - Double-click `Stop Site Expense Manager.bat`.
 
 All your data remains safely stored on disk — nothing is lost.
+
+The Stop script also drops an `AutoBackup_<date>.zip` into your data folder's
+`reports\` subfolder every time you stop the app, so a recent copy is always
+sitting next to your database.
 
 ---
 

@@ -167,7 +167,9 @@ async def report_summary(month:str="2026-08"):
         out={}
         for t in tx: out[t.get(key) or "Unassigned"]=out.get(t.get(key) or "Unassigned",0)+t["debit"]
         return [{"name":k,"amount":money(v)} for k,v in out.items()]
-    return {"month":month,"total":money(sum(x["debit"] for x in tx)),"transactions":len(tx),"by_site":group("site_name"),"by_category":group("category_name"),"by_account":group("account_name"),"transactions_data":tx}
+    y,m=(int(x) for x in month.split("-")) if "-" in month else (0,0)
+    closing=one("SELECT closed FROM month_closings WHERE year=? AND month=?",(y,m))
+    return {"month":month,"total":money(sum(x["debit"] for x in tx)),"transactions":len(tx),"by_site":group("site_name"),"by_category":group("category_name"),"by_account":group("account_name"),"transactions_data":tx,"closed":bool(closing and closing["closed"])}
 @api.get("/reports/export.xlsx")
 async def export_xlsx(month:str=""):
     query="SELECT t.transaction_date Date,a.bank_name Bank,a.nickname Account,t.description Description,t.debit Amount,s.site_name Site,c.name Category,t.upi_reference UPI_Reference,t.merchant Merchant,t.notes Notes FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id LEFT JOIN sites s ON s.id=t.site_id LEFT JOIN categories c ON c.id=t.category_id"; params=()
