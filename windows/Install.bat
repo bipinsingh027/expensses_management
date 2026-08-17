@@ -19,10 +19,19 @@ if errorlevel 1 (
 where node >nul 2>&1
 if errorlevel 1 (
     echo [X] Node.js was not found in PATH.
-    echo     Please install Node.js 18 LTS from https://nodejs.org/en/download
+    echo     Please install Node.js 20 LTS from https://nodejs.org/en/download
     echo     then run Install.bat again.
     pause
     exit /b 1
+)
+
+REM Warn about very new Node versions (react-scripts 5 is happiest on 18-22 LTS).
+for /f "tokens=1 delims=." %%V in ('node -p "process.versions.node"') do set NODE_MAJOR=%%V
+if %NODE_MAJOR% GEQ 23 (
+    echo.
+    echo [!] Node.js %NODE_MAJOR% detected. The build has been tested on Node 18-22 LTS.
+    echo     If step [4/5] fails, install Node.js 20 LTS from https://nodejs.org and rerun.
+    echo.
 )
 
 echo [1/5] Creating Python virtual environment...
