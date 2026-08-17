@@ -43,7 +43,7 @@ if errorlevel 1 goto :err
 
 echo [3/5] Installing frontend dependencies...
 pushd frontend
-call npm install --no-audit --no-fund
+call npm install --no-audit --no-fund --legacy-peer-deps
 if errorlevel 1 (
     popd
     goto :err
