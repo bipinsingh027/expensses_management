@@ -1,0 +1,25 @@
+{
+  "summary": "Bug-fix verification for React 'TypeError: destroy is not a function'. Verified all 8 backend endpoints return 200 and completed full sidebar navigation (Dashboard, Transactions, Statements, Accounts, Sites, Categories, Rules, Reports, Backup & restore, Settings) plus 3x round-trip Dashboard<->Accounts. No page errors and no 'destroy is not a function' errors captured in browser console. Sample data (HDFC/SBI accounts, Green Valley/Sunshine Apartment sites, Cement/Diesel categories, 20 transaction rows) is intact.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["Recharts ResponsiveContainer emits 'width(-1) and height(-1) of chart should be greater than 0' warnings on initial mount. Not related to this bug fix, but consider setting an explicit minHeight on the chart wrapper."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_site_expense.py"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "App.js is a single ~44-line minified-style file with very long lines; readability is poor. Consider splitting components (Dashboard, Transactions, Statements, MasterList, Rules, Reports, SettingsPage) into separate files.",
+    "Reports useEffect depends on `month` and re-fires on change — correctly returns void now; keep pattern consistent everywhere.",
+    "Statements load() returns Promise but is invoked from useEffect via block form — OK. Ensure future edits do NOT switch back to implicit-return arrows."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (8/8 endpoints 200)", "frontend": "100% (10/10 nav items, 0 destroy errors)"},
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "App is now no-auth SQLite local ledger (previous iteration tested a MongoDB+auth build and is obsolete). Public URL from frontend/.env used. Bug fix for useEffect implicit-Promise return verified across every sidebar route.",
+  "rca of the issue": "React 18 treats any truthy return value from a useEffect callback as a cleanup function and later invokes it on unmount. The affected effects were arrow functions with implicit returns of `api.get(...).then(...)` / `Promise.all([...]).then(...)`, which return a Promise. On unmount React invoked `promise()` and threw 'TypeError: destroy is not a function'. Fix wraps the body in braces `{ ... }` so the effect returns undefined. Verified across MasterList (Accounts/Sites/Categories), Rules, Reports, SettingsPage, Transactions, Statements."
+}

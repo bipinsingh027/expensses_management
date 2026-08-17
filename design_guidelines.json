@@ -1,50 +1,58 @@
 {
-  "app_name": "Site Expense Manager",
-  "app_type": "dashboard",
-  "archetype": "ORGANIC & EARTHY & PERFORMANCE PRO hybrid (Professional construction finance manager)",
   "typography": {
-    "headings": {
-      "font_family": "Outfit, sans-serif",
-      "weights": ["600", "700"],
-      "letter_spacing": "tracking-tight"
-    },
-    "body": {
-      "font_family": "Inter, sans-serif",
-      "weights": ["400", "500"]
-    },
-    "mono": {
-      "font_family": "JetBrains Mono, monospace"
-    }
+    "heading_font": "Plus Jakarta Sans, sans-serif",
+    "body_font": "Inter, sans-serif",
+    "mono_font": "JetBrains Mono, monospace"
   },
   "colors": {
-    "primary": "#0D5C3B",
-    "primary_hover": "#09462D",
+    "archetype": "ORGANIC & EARTHY",
+    "primary": "#1E3A34",
+    "primary_foreground": "#FFFFFF",
     "accent": "#D97706",
-    "background": "#F8FAFC",
-    "card_background": "#FFFFFF",
-    "text_main": "#0F172A",
-    "text_muted": "#64748B",
-    "border": "#E2E8F0",
-    "forbidden_color": "#1B93A4",
-    "forbidden_font": "space grotesk"
+    "background": "#FBFBFA",
+    "card": "#FFFFFF",
+    "muted": "#F3F4F6",
+    "border": "#E5E7EB",
+    "text": "#111827",
+    "text_muted": "#6B7280"
   },
-  "component_strategy": {
-    "card_style": "Cardless / sharp clean borders with rounded-xl and subtle ring",
-    "tables": "Dense data table with sticky header and row hover state",
-    "badges": "Pill shaped status badges for categories, sites, needs_review, duplicate"
+  "visual_enhancers": {
+    "border_radius": "0.75rem",
+    "shadow": "0 4px 20px -2px rgba(0, 0, 0, 0.05)",
+    "glassmorphism": "backdrop-blur-xl bg-white/80 border border-white/20"
   },
   "grids": {
-    "dashboard_grid": "grid-cols-1 md:grid-cols-4 gap-6",
-    "tetris_grid": "grid-cols-1 md:grid-cols-12 gap-6"
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-4 gap-6",
+    "tetris_grid": "grid grid-cols-1 md:grid-cols-12 gap-8"
+  },
+  "layouts": {
+    "container": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8",
+    "sidebar": "w-64 bg-slate-900 text-slate-100 flex flex-col"
   },
   "motion": {
-    "transition": "transition: transform 0.2s ease, opacity 0.2s ease",
-    "hover_lift": "hover:-translate-y-0.5 transition-all duration-200"
+    "transition": "transition-all duration-200 ease-in-out",
+    "hover_lift": "hover:-translate-y-0.5"
   },
   "accessibility": {
-    "min_contrast": "4.5:1 for normal text",
-    "test_id_convention": "kebab-case data-testid on all interactive and key informational elements"
+    "contrast_ratio": "Minimum 4.5:1 for normal text",
+    "focus_states": "focus:ring-2 focus:ring-[#1E3A34] focus:outline-none",
+    "test_attributes": "all interactive elements include data-testid"
   },
-  "image_urls": [],
-  "instructions_to_main_agent": "Implement complete Site Expense Manager with JWT auth (Admin & Employee roles), employees/sites/categories CRUD, statement upload with Excel/CSV parser, transaction classification rule engine, duplicate detection, transaction review & manual correction, site/employee reports, and interactive dashboard."
+  "media": {
+    "image_urls": [
+      {
+        "category": "accounting_ledger",
+        "url": "https://images.unsplash.com/photo-1649209979970-f01d950cc5ed?crop=entropy&cs=srgb&fm=jpg&q=85",
+        "description": "Calculator sitting on top of wooden table representing local offline expense tracking"
+      }
+    ]
+  },
+  "instructions_to_main_agent": "Build Site Expense Manager with React, FastAPI, SQLite, supporting accounts, statement upload with flexible column mapping & PDF/CSV/XLSX support, classification rules, duplicate detection, manual review, dashboard, site/bank/category/month reports, Excel/PDF exports, month closing, ZIP backup/restore, and sample demo data with delete option. Ensure all interactive items have data-testid attributes and high contrast accessibility.",
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "You MUST NOT apply universal transition like transition: all.",
+    "NEVER use complete transparent background in headers or overlays.",
+    "All interactive elements MUST include data-testid attribute.",
+    "Use sonner for toasts.",
+    "Use Lucide icons or Phosphor icons."
+  ]
 }

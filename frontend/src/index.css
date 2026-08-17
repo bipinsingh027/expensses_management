@@ -1,3 +1,2 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap');
 @tailwind base; @tailwind components; @tailwind utilities;
-*{box-sizing:border-box}body{margin:0;background:#f8fafc;color:#0f172a;font-family:Inter,sans-serif}button,input,select{font:inherit}button{cursor:pointer}a{text-decoration:none;color:inherit}
+*{box-sizing:border-box}body{margin:0;background:#fbfbfa;color:#111827;font-family:"Trebuchet MS",Arial,sans-serif}button,input,select{font:inherit}button{cursor:pointer}a{text-decoration:none;color:inherit}

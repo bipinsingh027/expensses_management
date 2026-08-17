@@ -1,147 +1,207 @@
-from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Form, Response
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import ReturnDocument
-from pydantic import BaseModel, EmailStr
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
-from typing import Optional
-import os, uuid, io, logging, bcrypt, jwt, pandas as pd
+from datetime import datetime, timezone
+import sqlite3, os, uuid, io, csv, re, json, zipfile, shutil
+import pandas as pd
+from pypdf import PdfReader
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
 ROOT = Path(__file__).parent
-load_dotenv(ROOT / ".env")
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
-db = client[os.environ["DB_NAME"]]
-UPLOADS = ROOT / "uploads"
-UPLOADS.mkdir(exist_ok=True)
-app = FastAPI(title="Site Expense Manager")
+DATA = ROOT / "local_data"
+DATA.mkdir(exist_ok=True)
+DB_PATH = DATA / "site_expense_manager.sqlite3"
+STATEMENTS = DATA / "statements"; DOCUMENTS = DATA / "documents"; REPORTS = DATA / "reports"
+for folder in (STATEMENTS, DOCUMENTS, REPORTS): folder.mkdir(exist_ok=True)
+app = FastAPI(title="Site Expense Manager — Local")
 api = APIRouter(prefix="/api")
-JWT_ALGORITHM = "HS256"
 
 def now(): return datetime.now(timezone.utc).isoformat()
-def safe(doc):
-    doc = dict(doc); doc.pop("_id", None); return doc
-def hash_password(password): return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-def verify_password(password, hashed): return bcrypt.checkpw(password.encode(), hashed.encode())
-def token(user):
-    return jwt.encode({"sub": user["id"], "exp": datetime.now(timezone.utc)+timedelta(hours=8)}, os.environ["JWT_SECRET"], algorithm=JWT_ALGORITHM)
+def db():
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; conn.execute("PRAGMA foreign_keys=ON"); return conn
+def rows(query, params=()):
+    with db() as conn: return [dict(r) for r in conn.execute(query, params).fetchall()]
+def one(query, params=()):
+    with db() as conn:
+        row = conn.execute(query, params).fetchone(); return dict(row) if row else None
+def uid(): return str(uuid.uuid4())
+def money(n): return round(float(n or 0), 2)
 
-async def current_user(request: Request):
-    value = request.cookies.get("access_token") or request.headers.get("Authorization", "").replace("Bearer ", "")
-    if not value: raise HTTPException(401, "Not authenticated")
-    try: payload = jwt.decode(value, os.environ["JWT_SECRET"], algorithms=[JWT_ALGORITHM])
-    except jwt.PyJWTError: raise HTTPException(401, "Session expired")
-    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
-    if not user or not user.get("active", True): raise HTTPException(401, "User not found")
-    return user
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, bank_name TEXT NOT NULL, nickname TEXT NOT NULL, last_four TEXT, account_type TEXT, active INTEGER DEFAULT 1, notes TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS sites (id TEXT PRIMARY KEY, site_name TEXT NOT NULL, site_code TEXT NOT NULL UNIQUE, address TEXT, active INTEGER DEFAULT 1, notes TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS categories (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, active INTEGER DEFAULT 1, notes TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS rules (id TEXT PRIMARY KEY, keyword TEXT NOT NULL, site_id TEXT, category_id TEXT, priority INTEGER DEFAULT 1, active INTEGER DEFAULT 1, created_at TEXT);
+CREATE TABLE IF NOT EXISTS statements (id TEXT PRIMARY KEY, account_id TEXT, original_filename TEXT, stored_path TEXT, statement_month INTEGER, statement_year INTEGER, uploaded_at TEXT, transaction_count INTEGER DEFAULT 0, debit_total REAL DEFAULT 0, import_status TEXT, warnings TEXT);
+CREATE TABLE IF NOT EXISTS transactions (id TEXT PRIMARY KEY, account_id TEXT, statement_id TEXT, transaction_date TEXT, transaction_time TEXT, debit REAL DEFAULT 0, credit REAL DEFAULT 0, description TEXT, upi_reference TEXT, transaction_reference TEXT, merchant TEXT, site_id TEXT, category_id TEXT, classification_status TEXT, duplicate_status TEXT, notes TEXT, is_demo INTEGER DEFAULT 0, created_at TEXT);
+CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, transaction_id TEXT, filename TEXT, stored_path TEXT, document_type TEXT, uploaded_at TEXT);
+CREATE TABLE IF NOT EXISTS month_closings (year INTEGER, month INTEGER, closed INTEGER DEFAULT 0, closed_at TEXT, PRIMARY KEY(year, month));
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+"""
 
-async def admin_only(user=Depends(current_user)):
-    if user["role"] != "admin": raise HTTPException(403, "Admin access required")
-    return user
+class AccountIn(BaseModel): bank_name: str; nickname: str; last_four: str = ""; account_type: str = "Current"; active: bool = True; notes: str = ""
+class SiteIn(BaseModel): site_name: str; site_code: str; address: str = ""; active: bool = True; notes: str = ""
+class CategoryIn(BaseModel): name: str; active: bool = True; notes: str = ""
+class RuleIn(BaseModel): keyword: str; site_id: str = ""; category_id: str = ""; priority: int = 1; active: bool = True
+class TransactionIn(BaseModel): site_id: str = ""; category_id: str = ""; notes: str = ""
+class CloseIn(BaseModel): year: int; month: int; closed: bool
 
-class Login(BaseModel): email: str; password: str
-class UserCreate(BaseModel): name: str; email: str; password: str; role: str = "employee"; phone: str = ""
-class SimpleCreate(BaseModel): name: str
-class SiteCreate(BaseModel): site_name: str; site_code: str; address: str = ""
-class RuleCreate(BaseModel): keyword: str; site_id: str; category_id: str; priority: int = 1
-class TransactionUpdate(BaseModel): site_id: Optional[str] = None; category_id: Optional[str] = None; notes: str = ""
+def init_db():
+    with db() as conn:
+        conn.executescript(SCHEMA)
+        if not conn.execute("SELECT 1 FROM accounts LIMIT 1").fetchone(): seed(conn)
+def insert(conn, table, payload):
+    keys = list(payload); conn.execute(f"INSERT INTO {table} ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})", [payload[k] for k in keys])
+def seed(conn):
+    accounts=[{"id":uid(),"bank_name":"HDFC","nickname":"HDFC XXXX1234","last_four":"1234","account_type":"Current","active":1,"notes":"Demo account","created_at":now()},{"id":uid(),"bank_name":"SBI","nickname":"SBI XXXX5678","last_four":"5678","account_type":"Savings","active":1,"notes":"Demo account","created_at":now()}]
+    sites=[{"id":uid(),"site_name":"Green Valley","site_code":"GV","address":"North Pune","active":1,"notes":"Demo site","created_at":now()},{"id":uid(),"site_name":"Sunshine Apartment","site_code":"SA","address":"West Pune","active":1,"notes":"Demo site","created_at":now()},{"id":uid(),"site_name":"Highway Project","site_code":"HW","address":"Mumbai Highway","active":1,"notes":"Demo site","created_at":now()}]
+    categories=[{"id":uid(),"name":x,"active":1,"notes":"Demo category","created_at":now()} for x in ["Cement","Diesel/Fuel","Labour","Material","Transport","Electrical","Plumbing","Equipment","Food","Travel","Office","Other"]]
+    for x in accounts: insert(conn,"accounts",x)
+    for x in sites: insert(conn,"sites",x)
+    for x in categories: insert(conn,"categories",x)
+    site={x["site_code"]:x for x in sites}; cat={x["name"]:x for x in categories}
+    descriptions=[("GV - CEMENT - ABC TRADERS","Cement",18500),("GV - DIESEL - HP PUMP","Diesel/Fuel",9200),("SA - LABOUR - RAJU","Labour",27600),("HW - MATERIAL - XYZ","Material",12400),("GV - TRANSPORT - TRUCK12","Transport",6800),("SA - ELECTRICAL - WIRE HOUSE","Electrical",14800),("HW - CEMENT - BUILD MART","Cement",21600),("GV - LABOUR - SHYAM","Labour",18000),("SA - MATERIAL - TILE WORLD","Material",11500),("HW - DIESEL - HP PUMP","Diesel/Fuel",8400),("GV - PLUMBING - PIPE CO","Plumbing",7200),("SA - TRANSPORT - MINI TRUCK","Transport",5600),("HW - EQUIPMENT - RENTAL","Equipment",9400),("GV - FOOD - SITE LUNCH","Food",3200),("SA - CEMENT - ABC TRADERS","Cement",16800),("HW - LABOUR - RAJU","Labour",22500),("GV - MATERIAL - STEEL HOUSE","Material",18900),("SA - OFFICE - STATIONERY","Office",2400),("HW - TRANSPORT - TRUCK12","Transport",7600),("GV - DIESEL - HP PUMP","Diesel/Fuel",8800)]
+    for i,(description,category,amount) in enumerate(descriptions):
+        code=description.split(" ")[0]; account=accounts[i%2]; insert(conn,"transactions",{"id":uid(),"account_id":account["id"],"statement_id":"demo-statement","transaction_date":f"2026-08-{(i%27)+1:02d}","transaction_time":"","debit":amount,"credit":0,"description":description,"upi_reference":f"DEMO{i+1:04d}","transaction_reference":f"DEMO-TXN-{i+1:03d}","merchant":description.split(" - ")[-1],"site_id":site[code]["id"],"category_id":cat[category]["id"],"classification_status":"Classified","duplicate_status":"Clear","notes":"Demo transaction — safe to delete","is_demo":1,"created_at":now()})
+    insert(conn,"settings",{"key":"company_name","value":"Site Expense Manager"}); insert(conn,"settings",{"key":"currency","value":"INR"})
+
+def classify(description, rules):
+    site_id=category_id=""
+    for rule in sorted(rules, key=lambda x:(x.get("priority",1), -len(x.get("keyword", "")))):
+        if rule["keyword"].lower() in description.lower():
+            if rule.get("site_id"): site_id=rule["site_id"]
+            if rule.get("category_id"): category_id=rule["category_id"]
+    return site_id, category_id, "Classified" if site_id and category_id else "Needs Review"
+def parse_pdf(content):
+    text="\n".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(content)).pages)
+    records=[]
+    for line in text.splitlines():
+        match=re.search(r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}).*?([0-9,]+\.\d{2})\s*(.*)$", line)
+        if match: records.append({"date":match.group(1),"amount":match.group(2).replace(",",""),"description":match.group(3).strip()})
+    return records
+def parse_statement(filename, content):
+    if filename.lower().endswith(".pdf"): return parse_pdf(content), "PDF text extraction completed; scanned PDFs may need manual mapping"
+    df=pd.read_csv(io.BytesIO(content)) if filename.lower().endswith(".csv") else pd.read_excel(io.BytesIO(content))
+    columns={str(c).lower().strip():c for c in df.columns}; date_col=next((columns[k] for k in columns if "date" in k),None); desc_col=next((columns[k] for k in columns if any(w in k for w in ["description","narration","remark","particular"])),None); debit_col=next((columns[k] for k in columns if any(w in k for w in ["debit","withdrawal","amount","paid"])),None); credit_col=next((columns[k] for k in columns if "credit" in k),None); upi_col=next((columns[k] for k in columns if "upi" in k or "reference" in k),None)
+    if not date_col or not desc_col or not debit_col: raise ValueError("Map date, description, and debit/amount columns to import this file")
+    return [{"date":str(r[date_col])[:10],"amount":str(r[debit_col]),"credit":str(r[credit_col]) if credit_col else "0","description":str(r[desc_col]),"upi":str(r[upi_col]) if upi_col else ""} for _,r in df.iterrows()], ""
 
 @api.get("/")
-async def root(): return {"message": "Site Expense Manager API"}
-
-@api.post("/auth/login")
-async def login(data: Login, response: Response):
-    user = await db.users.find_one({"email": data.email.lower()}, {"_id": 0})
-    if not user or not verify_password(data.password, user["password_hash"]): raise HTTPException(401, "Invalid email or password")
-    user.pop("password_hash", None); response.set_cookie("access_token", token(user), httponly=True, samesite="lax", max_age=28800)
-    return user
-
-@api.post("/auth/logout")
-async def logout(response: Response, user=Depends(current_user)):
-    response.delete_cookie("access_token"); return {"ok": True}
-
-@api.get("/auth/me")
-async def me(user=Depends(current_user)): return user
-
-@api.post("/auth/register")
-async def register(data: UserCreate, user=Depends(admin_only)):
-    if await db.users.find_one({"email": data.email.lower()}): raise HTTPException(400, "Email already exists")
-    item = {"id": str(uuid.uuid4()), "name": data.name, "email": data.email.lower(), "phone": data.phone, "role": data.role, "active": True, "password_hash": hash_password(data.password), "created_at": now()}
-    await db.users.insert_one(item); item.pop("password_hash"); return item
-
-@api.get("/users")
-async def users(user=Depends(admin_only)): return [safe(x) for x in await db.users.find({}, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(100)]
-
-@api.get("/sites")
-async def sites(user=Depends(current_user)): return [safe(x) for x in await db.sites.find({}, {"_id": 0}).sort("site_name", 1).to_list(100)]
-@api.post("/sites")
-async def create_site(data: SiteCreate, user=Depends(admin_only)):
-    item = {"id": str(uuid.uuid4()), **data.model_dump(), "active": True, "created_at": now()}; await db.sites.insert_one(item); return safe(item)
-@api.get("/categories")
-async def categories(user=Depends(current_user)): return [safe(x) for x in await db.categories.find({}, {"_id": 0}).sort("category_name", 1).to_list(100)]
-@api.post("/categories")
-async def create_category(data: SimpleCreate, user=Depends(admin_only)):
-    item = {"id": str(uuid.uuid4()), "category_name": data.name, "active": True, "created_at": now()}; await db.categories.insert_one(item); return safe(item)
-
+async def root(): return {"message":"Site Expense Manager local API","database":"SQLite","offline_ready":True}
 @api.get("/dashboard")
-async def dashboard(user=Depends(current_user)):
-    txns = await db.transactions.find({}, {"_id": 0}).to_list(5000)
-    sites = await db.sites.find({}, {"_id": 0}).to_list(100); cats = await db.categories.find({}, {"_id": 0}).to_list(100); employees = await db.users.find({"role": "employee"}, {"_id": 0}).to_list(100)
-    site_names = {x["id"]: x["site_name"] for x in sites}; cat_names = {x["id"]: x["category_name"] for x in cats}
-    def totals(key, labels): return [{"name": labels.get(k, "Unassigned"), "amount": round(sum(float(t.get("amount",0)) for t in txns if t.get(key)==k),2)} for k in labels]
-    return {"summary": {"total": round(sum(float(t.get("amount",0)) for t in txns),2), "transactions": len(txns), "employees": len(employees), "sites": len(sites), "review": sum(t.get("classification_status")=="Needs Review" for t in txns), "duplicates": sum(t.get("duplicate_status")=="Possible Duplicate" for t in txns)}, "site_totals": totals("site_id", site_names), "category_totals": totals("category_id", cat_names), "recent": sorted(txns, key=lambda x:x.get("transaction_date", ""), reverse=True)[:8]}
-
+async def dashboard(month:int=8,year:int=2026):
+    tx=rows("SELECT * FROM transactions WHERE substr(transaction_date,1,4)=? AND substr(transaction_date,6,2)=?",(str(year),f"{month:02d}")); accounts=rows("SELECT * FROM accounts WHERE active=1"); sites=rows("SELECT * FROM sites WHERE active=1"); cats=rows("SELECT * FROM categories WHERE active=1")
+    def totals(key, lookup): return [{"name":x.get("name") or x.get("site_name") or x.get("nickname"),"amount":money(sum(t["debit"] for t in tx if t.get(key)==x["id"]))} for x in lookup]
+    return {"month":month,"year":year,"summary":{"total":money(sum(t["debit"] for t in tx)),"transactions":len(tx),"statements":len(rows("SELECT * FROM statements WHERE statement_year=? AND statement_month=?",(year,month))),"accounts":len(accounts),"sites":len(sites),"review":sum(t["classification_status"]!="Classified" for t in tx),"duplicates":sum(t["duplicate_status"]=="Possible Duplicate" for t in tx)},"site_totals":totals("site_id",sites),"category_totals":totals("category_id",cats),"account_totals":totals("account_id",accounts),"recent":tx[:8]}
+@api.get("/accounts")
+async def accounts(): return rows("SELECT * FROM accounts ORDER BY bank_name,nickname")
+@api.post("/accounts")
+async def create_account(data:AccountIn):
+    item={"id":uid(),**data.model_dump(),"active":int(data.active),"created_at":now()}
+    with db() as c: insert(c,"accounts",item)
+    return item
+@api.get("/sites")
+async def sites(): return rows("SELECT * FROM sites ORDER BY site_name")
+@api.post("/sites")
+async def create_site(data:SiteIn):
+    item={"id":uid(),**data.model_dump(),"active":int(data.active),"created_at":now()}
+    with db() as c: insert(c,"sites",item)
+    return item
+@api.get("/categories")
+async def categories(): return rows("SELECT * FROM categories ORDER BY name")
+@api.post("/categories")
+async def create_category(data:CategoryIn):
+    item={"id":uid(),**data.model_dump(),"active":int(data.active),"created_at":now()}
+    with db() as c: insert(c,"categories",item)
+    return item
+@api.get("/rules")
+async def rules(): return rows("SELECT r.*,s.site_name,c.name category_name FROM rules r LEFT JOIN sites s ON s.id=r.site_id LEFT JOIN categories c ON c.id=r.category_id ORDER BY priority")
+@api.post("/rules")
+async def create_rule(data:RuleIn):
+    item={"id":uid(),**data.model_dump(),"active":int(data.active),"created_at":now()}
+    with db() as c: insert(c,"rules",item)
+    return item
 @api.get("/transactions")
-async def transactions(user=Depends(current_user)):
-    return [safe(x) for x in await db.transactions.find({}, {"_id": 0}).sort("transaction_date", -1).to_list(5000)]
+async def transactions(month:str="",account_id:str="",site_id:str="",category_id:str="",status:str="",search:str=""):
+    query="SELECT t.*,a.nickname account_name,s.site_name,c.name category_name FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id LEFT JOIN sites s ON s.id=t.site_id LEFT JOIN categories c ON c.id=t.category_id WHERE 1=1"; params=[]
+    if month: query+=" AND substr(t.transaction_date,1,7)=?"; params.append(month)
+    for field,value in [("t.account_id",account_id),("t.site_id",site_id),("t.category_id",category_id),("t.classification_status",status)]:
+        if value: query+=f" AND {field}=?"; params.append(value)
+    if search: query+=" AND (t.description LIKE ? OR t.upi_reference LIKE ? OR t.merchant LIKE ? OR t.notes LIKE ?)"; params += [f"%{search}%"]*4
+    return rows(query+" ORDER BY t.transaction_date DESC",params)
 @api.patch("/transactions/{txn_id}")
-async def update_transaction(txn_id: str, data: TransactionUpdate, user=Depends(current_user)):
-    patch = {k:v for k,v in data.model_dump().items() if v is not None}; patch["classification_status"] = "Classified" if patch.get("site_id") and patch.get("category_id") else "Needs Review"
-    result = await db.transactions.find_one_and_update({"id": txn_id}, {"$set": patch}, projection={"_id": 0}, return_document=ReturnDocument.AFTER)
-    if not result: raise HTTPException(404, "Transaction not found")
-    return result
-
-@api.post("/statements/upload")
-async def upload_statement(employee_id: str = Form(...), statement_month: str = Form(...), statement_year: str = Form(...), file: UploadFile = File(...), user=Depends(current_user)):
-    if user["role"] != "admin" and employee_id in {"", "undefined", "null"}: employee_id = user["id"]
-    if user["role"] != "admin" and employee_id != user["id"]: raise HTTPException(403, "You can only upload your own statement")
-    content = await file.read(); path = UPLOADS / f"{uuid.uuid4()}_{file.filename}"; path.write_bytes(content)
-    try:
-        df = pd.read_csv(io.BytesIO(content)) if file.filename.lower().endswith(".csv") else pd.read_excel(io.BytesIO(content))
-    except Exception as exc: raise HTTPException(400, f"Could not read statement: {exc}")
-    cols = {str(c).lower().strip(): c for c in df.columns}; date_col = next((cols[k] for k in cols if "date" in k), None); amount_col = next((cols[k] for k in cols if any(x in k for x in ["amount", "debit", "paid"])), None); desc_col = next((cols[k] for k in cols if any(x in k for x in ["description", "narration", "remark"])), None)
-    if not date_col or not amount_col or not desc_col: raise HTTPException(400, "Could not detect date, amount, and description columns")
-    sites = await db.sites.find({}, {"_id": 0}).to_list(100); cats = await db.categories.find({}, {"_id": 0}).to_list(100); rules = await db.classification_rules.find({"active": True}, {"_id": 0}).to_list(100)
-    upload_id = str(uuid.uuid4()); records=[]; duplicate_count=0
-    for _, row in df.iterrows():
-        desc = str(row[desc_col]); amount = float(str(row[amount_col]).replace(",", "").replace("₹", "") or 0); date = str(row[date_col])[:10]; site_id=category_id=None
-        for rule in sorted(rules, key=lambda r:r.get("priority",1)):
-            if rule["keyword"].lower() in desc.lower(): site_id, category_id = rule["site_id"], rule["category_id"]; break
-        duplicate = await db.transactions.find_one({"employee_id": employee_id, "transaction_date": date, "amount": amount, "description": desc}, {"_id": 0})
-        if duplicate: duplicate_count += 1
-        records.append({"id": str(uuid.uuid4()), "statement_upload_id": upload_id, "employee_id": employee_id, "transaction_date": date, "amount": amount, "transaction_type": "Debit", "description": desc, "site_id": site_id, "category_id": category_id, "classification_status": "Classified" if site_id and category_id else "Needs Review", "duplicate_status": "Possible Duplicate" if duplicate else "Clear", "created_at": now()})
-    if records: await db.transactions.insert_many(records)
-    statement = {"id": upload_id, "employee_id": employee_id, "statement_month": statement_month, "statement_year": statement_year, "original_file_name": file.filename, "file_path": str(path), "upload_date": now(), "total_transactions": len(records), "total_amount": sum(x["amount"] for x in records), "import_status": "Imported", "created_at": now()}; await db.statement_uploads.insert_one(statement)
-    return {"id": upload_id, "imported": len(records), "total": statement["total_amount"], "classified": sum(x["classification_status"]=="Classified" for x in records), "review": sum(x["classification_status"]=="Needs Review" for x in records), "duplicates": duplicate_count}
-
+async def update_transaction(txn_id:str,data:TransactionIn):
+    status="Classified" if data.site_id and data.category_id else "Needs Review"
+    with db() as c: c.execute("UPDATE transactions SET site_id=?,category_id=?,notes=?,classification_status=? WHERE id=?",(data.site_id,data.category_id,data.notes,status,txn_id))
+    return one("SELECT * FROM transactions WHERE id=?",(txn_id,))
 @api.get("/statements")
-async def statements(user=Depends(current_user)): return [safe(x) for x in await db.statement_uploads.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)]
-@api.post("/seed")
-async def seed(user=Depends(admin_only)): return await seed_data(force=True)
-
-async def seed_data(force=False):
-    if await db.users.find_one({"email": os.environ["ADMIN_EMAIL"]}): return {"seeded": False}
-    admin={"id":str(uuid.uuid4()),"name":"Aarav Mehta","email":os.environ["ADMIN_EMAIL"],"phone":"","role":"admin","active":True,"password_hash":hash_password(os.environ["ADMIN_PASSWORD"]),"created_at":now()}; employee={"id":str(uuid.uuid4()),"name":"Rohan Kulkarni","email":"rohan@siteexpense.local","phone":"+91 98765 43210","role":"employee","active":True,"password_hash":hash_password("employee123"),"created_at":now()}; await db.users.insert_many([admin,employee])
-    sites=[{"id":str(uuid.uuid4()),"site_name":"ABC Heights","site_code":"ABC-01","address":"Baner, Pune","active":True,"created_at":now()},{"id":str(uuid.uuid4()),"site_name":"XYZ Warehouse","site_code":"XYZ-02","address":"Wakad, Pune","active":True,"created_at":now()}]; cats=[{"id":str(uuid.uuid4()),"category_name":x,"active":True,"created_at":now()} for x in ["Cement","Diesel / Fuel","Labour","Material","Transport","Equipment","Food","Travel","Other"]]; await db.sites.insert_many(sites); await db.categories.insert_many(cats)
-    for i,(site,cat,amount,desc) in enumerate([(sites[0],cats[0],18400,"ABC HEIGHTS CEMENT"),(sites[0],cats[1],9200,"ABC HEIGHTS DIESEL"),(sites[1],cats[2],27600,"XYZ WAREHOUSE LABOUR"),(sites[1],cats[3],12400,"XYZ WAREHOUSE MATERIAL"),(sites[0],cats[4],6800,"ABC HEIGHTS TRANSPORT")]): await db.transactions.insert_one({"id":str(uuid.uuid4()),"employee_id":employee["id"],"statement_upload_id":"sample","transaction_date":f"2026-08-{10+i}","amount":amount,"transaction_type":"Debit","description":desc,"site_id":site["id"],"category_id":cat["id"],"classification_status":"Classified","duplicate_status":"Clear","created_at":now()})
-    return {"seeded": True}
+async def statements(): return rows("SELECT st.*,a.nickname account_name FROM statements st LEFT JOIN accounts a ON a.id=st.account_id ORDER BY uploaded_at DESC")
+@api.post("/statements/upload")
+async def upload_statement(account_id:str=Form(...),statement_month:int=Form(...),statement_year:int=Form(...),file:UploadFile=File(...)):
+    content=await file.read(); statement_id=uid(); stored=STATEMENTS/f"{statement_id}_{file.filename}"; stored.write_bytes(content)
+    try: records,warnings=parse_statement(file.filename,content)
+    except Exception as exc: records=[]; warnings=str(exc)
+    ruleset=rows("SELECT * FROM rules WHERE active=1"); imported=[]; duplicates=0
+    for r in records:
+        amount=money(re.sub(r"[^0-9.-]","",r.get("amount","0")) or 0); description=r.get("description",""); site_id,category_id,status=classify(description,ruleset); duplicate=one("SELECT id FROM transactions WHERE account_id=? AND transaction_date=? AND debit=? AND (upi_reference=? OR description=?)",(account_id,r.get("date",""),amount,r.get("upi",""),description)); duplicate_status="Possible Duplicate" if duplicate else "Clear"; duplicates+=bool(duplicate)
+        imported.append({"id":uid(),"account_id":account_id,"statement_id":statement_id,"transaction_date":r.get("date",""),"transaction_time":"","debit":amount,"credit":money(re.sub(r"[^0-9.-]","",r.get("credit","0")) or 0),"description":description,"upi_reference":r.get("upi",""),"transaction_reference":"","merchant":"","site_id":site_id,"category_id":category_id,"classification_status":status,"duplicate_status":duplicate_status,"notes":"","is_demo":0,"created_at":now()})
+    with db() as c:
+        for item in imported: insert(c,"transactions",item)
+        insert(c,"statements",{"id":statement_id,"account_id":account_id,"original_filename":file.filename,"stored_path":str(stored),"statement_month":statement_month,"statement_year":statement_year,"uploaded_at":now(),"transaction_count":len(imported),"debit_total":sum(x["debit"] for x in imported),"import_status":"Imported" if records else "Needs Mapping","warnings":warnings})
+    return {"id":statement_id,"imported":len(imported),"total":sum(x["debit"] for x in imported),"classified":sum(x["classification_status"]=="Classified" for x in imported),"review":sum(x["classification_status"]=="Needs Review" for x in imported),"duplicates":duplicates,"warnings":warnings}
+@api.get("/statements/{statement_id}/download")
+async def download_statement(statement_id:str):
+    item=one("SELECT * FROM statements WHERE id=?",(statement_id,))
+    if not item or not Path(item["stored_path"]).exists(): raise HTTPException(404,"Original statement not found")
+    return FileResponse(item["stored_path"],filename=item["original_filename"])
+@api.get("/reports/summary")
+async def report_summary(month:str="2026-08"):
+    tx=rows("SELECT t.*,a.nickname account_name,s.site_name,c.name category_name FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id LEFT JOIN sites s ON s.id=t.site_id LEFT JOIN categories c ON c.id=t.category_id WHERE substr(transaction_date,1,7)=? ORDER BY transaction_date",(month,))
+    def group(key):
+        out={}
+        for t in tx: out[t.get(key) or "Unassigned"]=out.get(t.get(key) or "Unassigned",0)+t["debit"]
+        return [{"name":k,"amount":money(v)} for k,v in out.items()]
+    return {"month":month,"total":money(sum(x["debit"] for x in tx)),"transactions":len(tx),"by_site":group("site_name"),"by_category":group("category_name"),"by_account":group("account_name"),"transactions_data":tx}
+@api.get("/reports/export.xlsx")
+async def export_xlsx(month:str=""):
+    query="SELECT t.transaction_date Date,a.bank_name Bank,a.nickname Account,t.description Description,t.debit Amount,s.site_name Site,c.name Category,t.upi_reference UPI_Reference,t.merchant Merchant,t.notes Notes FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id LEFT JOIN sites s ON s.id=t.site_id LEFT JOIN categories c ON c.id=t.category_id"; params=()
+    if month: query+=" WHERE substr(t.transaction_date,1,7)=?"; params=(month,)
+    frame=pd.DataFrame(rows(query,params)); path=REPORTS/f"SiteExpense_{month or 'all'}.xlsx"; frame.to_excel(path,index=False); return FileResponse(path,filename=path.name)
+@api.get("/reports/export.pdf")
+async def export_pdf(month:str=""):
+    data=await report_summary(month or datetime.now().strftime("%Y-%m")); path=REPORTS/f"SiteExpense_{month or 'all'}.pdf"; c=canvas.Canvas(str(path),pagesize=A4); c.setFont("Helvetica-Bold",18); c.drawString(48,790,"Site Expense Manager"); c.setFont("Helvetica",11); c.drawString(48,770,f"Monthly report · {month or 'All transactions'}"); c.setFont("Helvetica-Bold",14); c.drawString(48,725,f"Total expenses: ₹{data['total']:,.2f}"); c.setFont("Helvetica",11); y=690; c.drawString(48,y,f"Transactions: {data['transactions']}"); y-=30; c.setFont("Helvetica-Bold",12); c.drawString(48,y,"Site-wise expenses"); y-=22; c.setFont("Helvetica",10)
+    for item in data["by_site"][:12]: c.drawString(62,y,f"{item['name']}: ₹{item['amount']:,.2f}"); y-=18
+    c.save(); return FileResponse(path,filename=path.name)
+@api.post("/documents")
+async def upload_document(transaction_id:str=Form(...),file:UploadFile=File(...)):
+    path=DOCUMENTS/f"{uid()}_{file.filename}"; path.write_bytes(await file.read()); item={"id":uid(),"transaction_id":transaction_id,"filename":file.filename,"stored_path":str(path),"document_type":file.content_type or "file","uploaded_at":now()}
+    with db() as c: insert(c,"documents",item)
+    return item
+@api.get("/documents/{transaction_id}")
+async def documents(transaction_id:str): return rows("SELECT id,transaction_id,filename,document_type,uploaded_at FROM documents WHERE transaction_id=?",(transaction_id,))
+@api.get("/backup")
+async def backup():
+    path=REPORTS/f"SiteExpenseBackup_{datetime.now().strftime('%Y-%m-%d')}.zip"
+    with zipfile.ZipFile(path,"w",zipfile.ZIP_DEFLATED) as z:
+        z.write(DB_PATH,"site_expense_manager.sqlite3")
+        for folder in (STATEMENTS,DOCUMENTS):
+            for f in folder.iterdir(): z.write(f,f"{folder.name}/{f.name}")
+    return FileResponse(path,filename=path.name)
+@api.post("/sample-data/delete")
+async def delete_sample_data():
+    with db() as c: c.execute("DELETE FROM transactions WHERE is_demo=1"); c.execute("DELETE FROM accounts WHERE notes='Demo account'"); c.execute("DELETE FROM sites WHERE notes='Demo site'"); c.execute("DELETE FROM categories WHERE notes='Demo category'")
+    return {"deleted":True}
+@api.get("/settings")
+async def settings(): return {x["key"]:x["value"] for x in rows("SELECT * FROM settings")}
+@api.post("/month-close")
+async def month_close(data:CloseIn):
+    with db() as c: c.execute("INSERT OR REPLACE INTO month_closings(year,month,closed,closed_at) VALUES(?,?,?,?)",(data.year,data.month,int(data.closed),now()))
+    return {"year":data.year,"month":data.month,"closed":data.closed}
 
 @app.on_event("startup")
-async def startup():
-    await db.users.create_index("email", unique=True); await seed_data()
+async def startup(): init_db()
 app.include_router(api)
-app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000"), "https://site-spend-central.preview.emergentagent.com"], allow_methods=["*"], allow_headers=["*"])
-@app.on_event("shutdown")
-async def shutdown(): client.close()
+app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:3000","http://127.0.0.1:3000","https://site-spend-central.preview.emergentagent.com"],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
